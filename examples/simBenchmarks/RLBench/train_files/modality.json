@@ -1,0 +1,23 @@
+{
+  "_comment": "RLBench — gr00t modality schema. Drop at meta/modality.json of the rlbench_lerobot dataset.",
+  "_critical": "annotation.human.action.task_description.original_key MUST be 'task_index'. Anything else silently breaks language conditioning.",
+
+  "video": {
+    "primary_image": {"original_key": "observation.images.image"},
+    "wrist_image": {"original_key": "observation.images.wrist_image"}
+  },
+
+  "state": {
+    "joint_positions": {"start": 0, "end": 7, "original_key": "observation.state"},
+    "gripper": {"start": 7, "end": 8, "original_key": "observation.state"}
+  },
+
+  "action": {
+    "joint_positions": {"start": 0, "end": 7, "original_key": "action"},
+    "gripper": {"start": 7, "end": 8, "original_key": "action"}
+  },
+
+  "annotation": {
+    "human.action.task_description": {"original_key": "task_index"}
+  }
+}
