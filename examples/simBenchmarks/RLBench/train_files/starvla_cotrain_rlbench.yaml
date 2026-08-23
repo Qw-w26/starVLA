@@ -1,0 +1,83 @@
+# RLBench training config — copy/adjust paths to your environment.
+# The mixture `rlbench_all` resolves to one LeRobot dataset subdir `rlbench_lerobot`
+# (produced by tools/collect_data.py) sitting under vla_data.data_root_dir.
+#
+# 8-DoF joint + gripper action (abs_qpos), 2 cameras (front=primary + wrist).
+run_id: starvla_qwenpi_rlbench_smoke
+run_root_dir: playground/Checkpoints
+seed: 42
+wandb_entity: your_wandb_entity
+wandb_project: starVLA_Rlbench
+is_debug: false
+version_id: "0.21"
+
+framework:
+  name: QwenPI_v3
+  qwenvl:
+    base_vlm: playground/Pretrained_models/Qwen3-VL-2B-Instruct
+    attn_implementation: flash_attention_2
+  action_model:
+    action_model_type: LayerwiseFM
+    action_dim: 8           # 7 joint + 1 gripper
+    state_dim: 8            # 7 joint + 1 gripper
+    action_horizon: 8       # == len(action_indices) in data_config.py
+    repeated_diffusion_steps: 2
+    num_inference_timesteps: 4
+    add_pos_embed: true
+    max_seq_len: 512
+    num_target_vision_tokens: 32
+    noise_beta_alpha: 1.5
+    noise_beta_beta: 1.0
+    noise_s: 0.999
+    num_timestep_buckets: 1000
+    diffusion_model_cfg:
+      action_dit_hidden_dim: 512
+      dropout: 0.2
+      final_dropout: true
+      interleave_self_attention: true
+      norm_type: ada_norm
+      positional_embeddings: null
+      attention_head_dim: 64
+
+datasets:
+  vla_data:
+    dataset_py: lerobot_datasets
+    include_state: true
+    data_root_dir: playground/Datasets/RLBENCH    # parent of rlbench_lerobot/
+    data_mix: rlbench_all
+    action_type: abs_qpos
+    action_mode: abs
+    sequential_step_sampling: false
+    per_device_batch_size: 2
+    load_all_data_for_training: true
+    obs_image_size: [256, 256]
+    video_backend: torchvision_av
+
+trainer:
+  max_train_steps: 100       # smoke test — raise for real training
+  num_warmup_steps: 10
+  save_interval: 100
+  eval_interval: 1000
+  learning_rate:
+    base: 2.5e-05
+    qwen_vl_interface: 1.0e-05
+    action_model: 1.0e-04
+  lr_scheduler_type: cosine_with_min_lr
+  scheduler_specific_kwargs:
+    min_lr: 1.0e-06
+  freeze_modules: ''
+  loss_scale:
+    vla: 1.0
+    vlm: 0.1
+  max_grad_norm: 1.0
+  weight_decay: 0.0
+  logging_frequency: 10
+  gradient_clipping: 1.0
+  gradient_accumulation_steps: 1
+  gradient_checkpointing: true
+  optimizer:
+    name: AdamW
+    betas: [0.9, 0.95]
+    eps: 1.0e-08
+    weight_decay: 1.0e-08
+  repeated_diffusion_steps: 2

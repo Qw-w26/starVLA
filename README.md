@@ -195,6 +195,22 @@ Achieve **state-of-the-art (SOTA) performance** on a variety of benchmarks, as f
 
 We have more results for RoboCasa, RoboTwin 2.0, Behavior-1k, Calvin. See our [🍀 Overleaf](https://www.overleaf.com/read/qqtwrnprctkf#d5bdce), which continuously presents our real-time experimental results.
 
+#### TODO — RLBench data generation needs GL (OpenGL) access
+
+The [RLBench](examples/simBenchmarks/RLBench/README.md) integration
+(CoppiuliaSim-based data generation, training recipe, and evaluator) is fully
+implemented and the generated dataset format is validated against the starVLA
+data loader. Generating the RGB demonstrations (and open-loop/closed-loop
+evaluation) requires CoppeliaSim's camera renderer to obtain a real OpenGL
+context, which currently fails for accounts without `/dev/dri` permission
+(the user must belong to the `video` group) on headless GPU servers, and on
+GPU-less WSL hosts.
+
+**TODO:** grant the test account `video`-group access to `/dev/dri` (or run
+RLBench generation/eval on a machine with a real GL display or GPU). Until
+then, `tools/collect_data.py` cannot render camera frames and will crash with
+`signal 11` at the first camera observation.
+
 ---
 
 ## Model Zoo
