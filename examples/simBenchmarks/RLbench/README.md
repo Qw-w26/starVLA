@@ -21,7 +21,7 @@ Screw Bulb -> `screw_nail`, and Put in Board -> `insert_onto_square_peg`.
 | StarVLA-OFT | JointVelocity + Discrete | running | - | - | - | - | - | - | - | - | - | - | - |
 
 The LLARVA and PerAct rows are published baselines copied from the classic
-RLBench multi-task results referenced in `myfile/经典 RLBench Multi-Task 结果.md`.
+RLBench multi-task results referenced in **RLBench Multi-Task success rate (%)**。([OpenReview][1]).
 They are not StarVLA measurements. The StarVLA row remains blank until the
 currently running native-action experiment has completed evaluation; do not
 compare it with the published rows until the same task split, rollout budget,
@@ -49,11 +49,25 @@ export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$COPPELIASIM_ROOT"
 export QT_QPA_PLATFORM_PLUGIN_PATH="$COPPELIASIM_ROOT"
 ```
 
-On a headless server, use `xvfb-run` for CoppeliaSim rendering. Do not reuse a
-stale `DISPLAY` copied into an old tmux session, and do not use
-`QT_QPA_PLATFORM=offscreen` with CoppeliaSim 4.1.0 vision sensors: it cannot
-create the required OpenGL context. The following commands have been verified
-on the shared server using the `starvla` environment:
+<details>
+<summary><b>⚠️ Common Issues</b></summary>
+
+- **Headless server has no display:** Run CoppeliaSim through `xvfb-run`, for
+  example with `xvfb-run -a -s "-screen 0 1280x1024x24" ...`.
+- **A job runs inside an old tmux session:** Do not reuse a stale `DISPLAY`
+  value copied into that session. Start the command with a fresh Xvfb display
+  (using `xvfb-run`) so the GUI and OpenGL environment are created together.
+- **CoppeliaSim 4.1.0 vision sensors fail to initialize:** Do not set
+  `QT_QPA_PLATFORM=offscreen`. Vision sensors require the OpenGL context
+  provided by Xvfb; the offscreen Qt platform cannot create the required
+  context.
+- **OpenGL or camera failures are unclear:** Run the verification commands
+  below. `glxinfo -B` should report a working renderer before running RLBench.
+
+</details>
+
+The following commands have been verified on the shared server using the
+`starvla` environment:
 
 ```bash
 xvfb-run -a -s "-screen 0 1280x1024x24" glxinfo -B
@@ -152,6 +166,30 @@ that native representation, and its normalization statistics were computed
 from those same fields. The initial shared-server collection is intentionally
 kept under `playground/Datasets/RLBench_raw/` until this validation passes.
 
+The repository converter preserves every RGB camera as raw `uint8` PNG
+frames, concatenates fixed-size robot proprioception fields into
+`observation.state`, and keeps task-specific `task_low_dim_state` vectors in
+their own column. It writes the native ActionSpec to
+`meta/action_spec.json` and `meta/info.json`:
+
+```bash
+python -m pip install pyarrow
+python examples/simBenchmarks/RLbench/eval_files/resolve_action_dim.py \
+  --config examples/simBenchmarks/RLbench/configs/joint_velocity.yaml
+
+python -m examples.simBenchmarks.RLbench.conversion.rlbench_to_lerobot \
+  --raw-root playground/Datasets/RLBench_raw/joint_velocity_9task \
+  --output-root playground/Datasets/RLBench_lerobot/joint_velocity_9task \
+  --config examples/simBenchmarks/RLbench/configs/joint_velocity.yaml \
+  --environment-action-shape 8 \
+  --framework-action-dim 8
+```
+
+The converter fails before writing an episode if raw action width,
+RLBench `Environment.action_shape()`, LeRobot `action.shape[-1]`, and
+StarVLA `framework.action_model.action_dim` disagree. The supplied
+`joint_position.yaml` and `ee_pose_ik.yaml` select the corresponding modes.
+
 ## 5. Training
 
 The launcher starts CoppeliaSim briefly, resolves `Environment.action_shape()`,
@@ -207,3 +245,5 @@ available GPU or shows storage I/O stalls, start the same tmux command on
 another checked host and keep `RAW_ROOT`, `DATA_ROOT`, checkpoints, and logs
 under the shared `/home/qiwei` paths. Use a named tmux session for every long
 collection, training, or evaluation job and detach with `Ctrl-b d`.
+
+[1]: https://openreview.net/pdf/43263302a3a8d0de5a63e6f77b7cd0e0eb6986ca.pdf?utm_source=chatgpt.com "Accepted as a workshop paper to the 7th Robot Learning Workshop at ICLR 2025"
