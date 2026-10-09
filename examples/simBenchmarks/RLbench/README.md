@@ -1,4 +1,14 @@
-# RLBench Evaluation
+# RLBench: Robot Learning Benchmark [![Unit Tests](https://github.com/stepjam/RLBench/workflows/Unit%20Tests/badge.svg)](https://github.com/stepjam/RLBench/actions) [![Task Tests](https://github.com/stepjam/RLBench/workflows/Task%20Tests/badge.svg)](https://github.com/stepjam/RLBench/actions) [![Discord](https://img.shields.io/discord/694945190867370155.svg?label=&logo=discord&logoColor=ffffff&color=7389D8&labelColor=6A7EC2)](https://discord.gg/DXPCjmd)
+
+![task grid image missing](readme_files/task_grid.png)
+
+**RLBench** is an ambitious large-scale benchmark and learning environment 
+designed to facilitate research in a number of vision-guided manipulation
+research areas, including: reinforcement learning, imitation learning,
+multi-task learning, geometric computer vision, and in particular, 
+few-shot learning. [Click here for website and paper.](https://sites.google.com/corp/view/rlbench)
+
+# Integration
 
 This directory integrates RLBench as a native-action benchmark for StarVLA.
 RLBench owns action semantics: StarVLA consumes images and language, emits a
@@ -73,7 +83,7 @@ The following commands have been verified on the shared server using the
 xvfb-run -a -s "-screen 0 1280x1024x24" glxinfo -B
 python -m unittest tests.test_rlbench_adapter -v
 python examples/simBenchmarks/RLbench/eval_files/resolve_action_dim.py \
-  --config examples/simBenchmarks/RLbench/configs/joint_velocity.yaml
+  --config examples/simBenchmarks/RLbench/configs/env/joint_velocity.yaml
 ```
 
 The last command emits `RLBENCH_ACTION_DIM=8` for the default Panda
@@ -82,7 +92,7 @@ JointVelocity + Discrete configuration.
 ## 2. Action Mode Configuration
 
 The selected RLBench mode determines the model action dimension at runtime.
-The included [joint-velocity configuration](configs/joint_velocity.yaml) is:
+The included [joint-velocity configuration](configs/env/joint_velocity.yaml) is:
 
 ```yaml
 env:
@@ -175,15 +185,21 @@ their own column. It writes the native ActionSpec to
 ```bash
 python -m pip install pyarrow
 python examples/simBenchmarks/RLbench/eval_files/resolve_action_dim.py \
-  --config examples/simBenchmarks/RLbench/configs/joint_velocity.yaml
+  --config examples/simBenchmarks/RLbench/configs/env/joint_velocity.yaml
 
 python -m examples.simBenchmarks.RLbench.conversion.rlbench_to_lerobot \
   --raw-root playground/Datasets/RLBench_raw/joint_velocity_9task \
   --output-root playground/Datasets/RLBench_lerobot/joint_velocity_9task \
-  --config examples/simBenchmarks/RLbench/configs/joint_velocity.yaml \
+  --config examples/simBenchmarks/RLbench/configs/env/joint_velocity.yaml \
   --environment-action-shape 8 \
-  --framework-action-dim 8
+  --framework-action-dim 8 +  --fps 20
 ```
+
+The fps value is the effective rate of observations present in
+low_dim_obs.pkl, not the CoppeliaSim timestep. With RLBench's default
+record_gripper_closing=False, intermediate gripper-closing simulation steps
+may be absent from the raw observation sequence and cannot be reconstructed by
+the converter.
 
 The converter fails before writing an episode if raw action width,
 RLBench `Environment.action_shape()`, LeRobot `action.shape[-1]`, and
@@ -192,16 +208,50 @@ StarVLA `framework.action_model.action_dim` disagree. The supplied
 
 ## 5. Training
 
+The launcher reads these variables before resolving the native action
+dimension. Set them explicitly when running from another checkout:
+
+| Variable | Meaning | Default |
+| --- | --- | --- |
+| `STARVLA_DIR` | StarVLA repository root | Repository root inferred from the launcher; `/home/qiwei/starVLA` on the shared server |
+| `RLBENCH_ENV_CONFIG` | RLBench ActionMode YAML | `$STARVLA_DIR/examples/simBenchmarks/RLbench/configs/env/joint_velocity.yaml` |
+| `TRAIN_CONFIG` | StarVLA training YAML | Required; no implicit training recipe |
+| `ACCELERATE_CONFIG` | Hugging Face Accelerate launch config | `$STARVLA_DIR/starVLA/config/deepseeds/deepspeed_zero2.yaml` |
+| `TRAINING_SCRIPT` | Compatible VLA training entry point | `$STARVLA_DIR/starVLA/training/train_starvla.py` |
+
+The repository already provides these compatible VLA combinations:
+
+| Purpose | Accelerate config | Training script |
+| --- | --- | --- |
+| Default VLA/OFT | `deepspeed_zero2.yaml` | `train_starvla.py` |
+| ZeRO-3 VLA | `deepspeed_zero3.yaml` | `train_starvla.py` |
+| Alternate ZeRO-2 preset | `zero2.yaml` | `train_starvla.py` |
+| VLA + multimodal co-training | Any compatible preset | `train_starvla_cotrain.py` |
+
+Use either environment variables or launcher options for the last two:
+
+```bash
+export STARVLA_DIR=/home/qiwei/starVLA
+export RLBENCH_ENV_CONFIG=$STARVLA_DIR/examples/simBenchmarks/RLbench/configs/env/joint_velocity.yaml
+export TRAIN_CONFIG=$STARVLA_DIR/examples/simBenchmarks/RLbench/configs/train/rlbench_starvla_training.yaml
+export ACCELERATE_CONFIG=$STARVLA_DIR/starVLA/config/deepseeds/deepspeed_zero3.yaml
+export TRAINING_SCRIPT=$STARVLA_DIR/starVLA/training/train_starvla.py
+```
+
+The example TRAIN_CONFIG path above is a placeholder and must point to an
+existing YAML with the RLBench LeRobot dataset and the matching native action
+schema. The launcher validates all four paths before starting training.
+
 The launcher starts CoppeliaSim briefly, resolves `Environment.action_shape()`,
 and injects the result into the StarVLA action head. It never hard-codes 7.
 After placing a validated, native-action LeRobot dataset at `DATA_ROOT`, run:
 
 ```bash
-export RLBENCH_ENV_CONFIG=examples/simBenchmarks/RLbench/configs/joint_velocity.yaml
-export TRAIN_CONFIG=/path/to/rlbench_starvla_training.yaml
 export COPPELIASIM_ROOT=/path/to/CoppeliaSim
 
 bash examples/simBenchmarks/RLbench/train_files/run_rlbench_train.sh \
+  --accelerate-config "$ACCELERATE_CONFIG" \
+  --training-script "$TRAINING_SCRIPT" \
   --datasets.vla_data.data_root_dir "$DATA_ROOT" \
   --datasets.vla_data.data_mix rlbench_joint_velocity_9task
 ```
@@ -229,7 +279,7 @@ export QT_QPA_PLATFORM_PLUGIN_PATH="$COPPELIASIM_ROOT"
 
 xvfb-run -a -s "-screen 0 1280x1024x24" \
   python examples/simBenchmarks/RLbench/eval_files/eval_rlbench.py \
-  --config examples/simBenchmarks/RLbench/configs/joint_velocity.yaml \
+  --config examples/simBenchmarks/RLbench/configs/env/joint_velocity.yaml \
   --task PushButtons --episodes 50 --max-steps 40 --headless
 ```
 

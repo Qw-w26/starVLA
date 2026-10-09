@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import pickle
 from typing import Any, Iterator, Mapping
+import warnings
 
 import numpy as np
 from PIL import Image
@@ -13,23 +14,46 @@ from .rlbench_schema import action_from_observation, state_from_observation
 
 @dataclass(frozen=True)
 class RLBenchFrame:
+    """One frame decoded from an RLBench demonstration.
+
+    task_low_dim_state is an optional, task-specific vector provided by
+    RLBench's task implementation. It is separate from the common robot
+    proprioception in state and does not have a shared dimension or
+    universal meaning across tasks. For example, an OpenDrawer task may
+    expose the drawer or handle joint state so that the degree of opening can
+    be measured, while a multi-stage task such as PutItemInDrawer may expose
+    values useful for identifying its current grasp, move, or place stage.
+    The exact meaning must be interpreted using the corresponding RLBench
+    task implementation.
+
+    The value is None when the raw observation does not provide this
+    task-specific state.
+    """
+
     action: np.ndarray
     state: np.ndarray
     state_slices: Mapping[str, tuple[int, int]]
     images: Mapping[str, np.ndarray]
     task_low_dim_state: np.ndarray | None
-    task: str
 
 
 @dataclass(frozen=True)
 class RLBenchEpisode:
+    """One episode decoded from an RLBench demonstration.
+
+    task_descriptions are generated for the task variation when the episode
+    is initialized and are shared by all frames in this episode.
+    """
     task_name: str
     variation: int
     episode_index: int
+    task_descriptions: tuple[str, ...]
     frames: tuple[RLBenchFrame, ...]
 
 
 def _numeric_pngs(directory: Path) -> list[Path]:
+    # RLbench saves frames as 0.png, 1.png, etc.
+    # We sort numerically to avoid 10.png coming before 2.png.
     return sorted(directory.glob("*.png"), key=lambda path: int(path.stem))
 
 
@@ -65,11 +89,31 @@ class RLBenchRawDataset:
     @staticmethod
     def _descriptions(variation_dir: Path) -> list[str]:
         path = variation_dir / "variation_descriptions.pkl"
+        # Use the directory name as a fallback if the descriptions file is missing or empty
+        # For example, open_drawer/variation0/ as variation_dir,
+        # but the variation_descriptions.pkl file is missing.
+        # The fallback is "open drawer".
+        fallback = variation_dir.parent.name.replace("_", " ")
         if not path.exists():
-            return [variation_dir.parent.name.replace("_", " ")]
+            warnings.warn(
+                f"RLBench variation descriptions are missing at {path}; "
+                f"falling back to task name {fallback!r}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return [fallback]
         with path.open("rb") as stream:
             descriptions = pickle.load(stream)
-        return [str(item) for item in descriptions] or [variation_dir.parent.name]
+        descriptions = [str(item) for item in descriptions]
+        if not descriptions:
+            warnings.warn(
+                f"RLBench variation descriptions are empty at {path}; "
+                f"falling back to task name {fallback!r}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return [fallback]
+        return descriptions
 
     def _read_episode(
         self,
@@ -79,27 +123,49 @@ class RLBenchRawDataset:
         episode_dir: Path,
         descriptions: list[str],
     ) -> RLBenchEpisode:
+
         with (episode_dir / "low_dim_obs.pkl").open("rb") as stream:
             observations = pickle.load(stream)
-        camera_paths = {
-            camera_dir.name: _numeric_pngs(camera_dir)
-            for camera_dir in sorted(episode_dir.iterdir())
-            if camera_dir.is_dir() and _numeric_pngs(camera_dir)
-            and camera_dir.name.endswith("_rgb")
-        }
+        # An example camera_paths layout:
+        # {
+        #     "front_rgb": [
+        #         Path("front_rgb/0.png"),
+        #         Path("front_rgb/1.png"),
+        #         ...
+        #     ],
+        #     "wrist_rgb": [
+        #         Path("wrist_rgb/0.png"),
+        #         Path("wrist_rgb/1.png"),
+        #         ...
+        #     ],
+        # }
+        camera_paths = {}
+
+        for camera_dir in sorted(episode_dir.iterdir()):
+            if not camera_dir.is_dir() or not camera_dir.name.endswith("_rgb"):
+                continue
+
+            paths = _numeric_pngs(camera_dir)
+            if paths:
+                camera_paths[camera_dir.name] = paths
+
         frames = []
-        task = descriptions[0]
+        # Multiple descriptions are accessed, reader just returns all of them.
         for index, observation in enumerate(observations):
             state, state_slices = state_from_observation(observation)
             images = {}
             for camera, paths in camera_paths.items():
-                if index >= len(paths):
+                # Check that the number of frames matches the number of observations
+                if len(paths) != len(observations):
                     raise ValueError(
-                        f"Camera {camera} has {len(paths)} frames but episode has "
-                        f"{len(observations)} observations: {episode_dir}"
+                        f"Camera {camera} has {len(paths)} frames, "
+                        f"but episode has {len(observations)} observations: "
+                        f"{episode_dir}"
                     )
                 with Image.open(paths[index]) as image:
+                    # image.shape: W,H to rgb.shape: H,W,C
                     rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+                # Store it contiguously in memory
                 images[camera] = np.ascontiguousarray(rgb)
             frames.append(
                 RLBenchFrame(
@@ -112,7 +178,12 @@ class RLBenchRawDataset:
                         if getattr(observation, "task_low_dim_state", None) is None
                         else np.asarray(observation.task_low_dim_state, dtype=np.float32).reshape(-1)
                     ),
-                    task=task,
                 )
             )
-        return RLBenchEpisode(task_name, variation, episode_index, tuple(frames))
+        return RLBenchEpisode(
+            task_name,
+            variation,
+            episode_index,
+            tuple(descriptions),
+            tuple(frames),
+        )

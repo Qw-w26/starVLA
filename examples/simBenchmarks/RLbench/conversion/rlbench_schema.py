@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from math import prod
 from typing import Any, Mapping, Sequence
+import warnings
 
 import numpy as np
 
@@ -95,13 +96,35 @@ def flatten_numeric(value: Any) -> np.ndarray:
 
 
 def state_from_observation(observation: Any) -> tuple[np.ndarray, dict[str, tuple[int, int]]]:
+    """Flatten supported RLBench state fields into one proprioceptive vector.
+
+    The fields are concatenated in STATE_FIELDS order. The returned
+    slices map each present field to its half-open range in state.
+    For example, with 7D joint positions and 7D joint velocities:
+
+        state.shape == (14,)
+        slices == {
+            "joint_positions": (0, 7),
+            "joint_velocities": (7, 14),
+        }
+        state[0:7] == observation.joint_positions
+        state[7:14] == observation.joint_velocities
+
+    Missing fields are skipped with a RuntimeWarning.
+    """
     values: list[np.ndarray] = []
     slices: dict[str, tuple[int, int]] = {}
     cursor = 0
     for field in STATE_FIELDS:
         value = getattr(observation, field, None)
         if value is None:
+            warnings.warn(
+                f"RLBench observation is missing state field {field!r}; skipping it",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             continue
+
         flattened = flatten_numeric(value)
         values.append(flattened)
         slices[field] = (cursor, cursor + len(flattened))
@@ -124,5 +147,6 @@ def action_from_observation(observation: Any, arm_type: str, gripper_type: str) 
     arm = flatten_numeric(getattr(observation, arm_fields[arm_type]))
     if gripper_type not in {"Discrete", "Continuous"}:
         raise ValueError(f"Unsupported RLBench gripper action mode: {gripper_type!r}")
+    # Whether the gripper is discrete or continuous, the gripper action is a single float.
     gripper = flatten_numeric(getattr(observation, "gripper_open"))
     return np.concatenate((arm, gripper)).astype(np.float32, copy=False)

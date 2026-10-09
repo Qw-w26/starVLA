@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 from PIL import Image
 
 from examples.simBenchmarks.RLbench.conversion.rlbench_reader import RLBenchRawDataset
@@ -16,12 +17,42 @@ from examples.simBenchmarks.RLbench.conversion.rlbench_schema import (
     assert_action_dimension_contract,
 )
 from examples.simBenchmarks.RLbench.conversion.rlbench_to_lerobot import convert
+from examples.simBenchmarks.RLbench.configs.train.data_config import (
+    RLBenchJointVelocityDataConfig,
+)
+from examples.simBenchmarks.RLbench.configs.train.data_registry import (
+    ROBOT_TYPE_CONFIG_MAP,
+)
+from examples.simBenchmarks.RLbench.configs.train.data_config import (
+    RLBenchJointVelocityDataConfig,
+)
+from examples.simBenchmarks.RLbench.configs.train.data_registry import (
+    ROBOT_TYPE_CONFIG_MAP,
+)
+from starVLA.dataloader.gr00t_lerobot.datasets import LeRobotSingleDataset
 
 
 def _write_fixture(root: Path) -> None:
+    """The structure of the fixture:
+        raw/
+        └── push_buttons/
+            └── variation0/
+                ├── variation_descriptions.pkl
+                └── episodes/
+                    └── episode0/
+                        ├── low_dim_obs.pkl
+                        ├── front_rgb/
+                        │   ├── 0.png
+                        │   └── 1.png
+                        └── wrist_rgb/
+                            ├── 0.png
+                            └── 1.png
+    """
     episode = root / "push_buttons" / "variation0" / "episodes" / "episode0"
     episode.mkdir(parents=True)
     observations = []
+    # Two frames of data, with incrementing values
+    # for each frame to ensure that the conversion preserves the data correctly.
     for frame in range(2):
         observations.append(
             SimpleNamespace(
@@ -36,6 +67,9 @@ def _write_fixture(root: Path) -> None:
                 task_low_dim_state=np.arange(3, dtype=np.float64),
             )
         )
+        # Two cameras, front_rgb and wrist_rgb,
+        # with incrementing pixel values for each frame to ensure
+        # that the conversion preserves the data correctly.
         for camera in ("front_rgb", "wrist_rgb"):
             camera_dir = episode / camera
             camera_dir.mkdir(exist_ok=True)
@@ -43,11 +77,75 @@ def _write_fixture(root: Path) -> None:
     with (episode / "low_dim_obs.pkl").open("wb") as stream:
         pickle.dump(observations, stream)
     with (root / "push_buttons" / "variation0" / "variation_descriptions.pkl").open("wb") as stream:
-        pickle.dump(["push the buttons"], stream)
+        pickle.dump(["push the buttons", "press all of the buttons"], stream)
 
 
 class RLBenchConversionTest(unittest.TestCase):
+    def test_registry_stores_config_class_and_horizon_is_injected(self):
+        config_class = ROBOT_TYPE_CONFIG_MAP["rlbench_joint_velocity"]
+        self.assertIs(config_class, RLBenchJointVelocityDataConfig)
+        config = config_class(action_horizon=5)
+        self.assertEqual(config.action_indices, [0, 1, 2, 3, 4])
+
+    def test_registry_stores_config_class_and_horizon_is_injected(self):
+        config_class = ROBOT_TYPE_CONFIG_MAP["rlbench_joint_velocity"]
+        self.assertIs(config_class, RLBenchJointVelocityDataConfig)
+        config = config_class(action_horizon=5)
+        self.assertEqual(config.action_indices, [0, 1, 2, 3, 4])
+
+    def test_video_path_is_required_metadata_but_not_the_png_decode_path(self):
+        """
+        Test that the video_path pattern, which is a path of png files, 
+        is required metadata for the dataset,
+        but that the actual video frames are read from the PNG files in the dataset.
+        """
+        dataset = LeRobotSingleDataset.__new__(LeRobotSingleDataset)
+        dataset._lerobot_info_meta = {
+            "video_path": "unused/video/{video_key}.mp4",
+        }
+        self.assertEqual(
+            dataset._get_video_path_pattern(),
+            "unused/video/{video_key}.mp4",
+        )
+
+        dataset._lerobot_info_meta = {}
+        with self.assertRaises(KeyError):
+            dataset._get_video_path_pattern()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            dataset_root = Path(temporary)
+            image_path = dataset_root / "images/front_rgb/episode_000000/000000.png"
+            image_path.parent.mkdir(parents=True)
+            # np.array[0]->1 frame, (3,2)->2 height 3 weight, (1,2,3) is RGB channel
+            Image.new("RGB", (3, 2), (1, 2, 3)).save(image_path)
+
+            dataset._dataset_path = dataset_root
+            dataset._delta_indices = {"video.front_rgb": np.array([0])}
+            dataset._trajectory_lengths = [1]
+            dataset.get_trajectory_index = lambda trajectory_id: 0
+            dataset._lerobot_modality_meta = SimpleNamespace(
+                video={
+                    "front_rgb": SimpleNamespace(
+                        original_key="observation.images.front_rgb"
+                    )
+                }
+            )
+            dataset.curr_traj_data = pd.DataFrame(
+                {
+                    "observation.images.front_rgb": [
+                        [{"path": "images/front_rgb/episode_000000/000000.png"}][0]
+                    ]
+                }
+            )
+
+            frames = dataset.get_video(0, "video.front_rgb", 0)
+
+        self.assertEqual(frames.shape, (1, 2, 3, 3))
+        # frames[0,0,0] is the left-up point
+        np.testing.assert_array_equal(frames[0, 0, 0], np.array([1, 2, 3]))
+
     def test_action_dimension_contract_is_shared_by_all_layers(self):
+        """Test that the action dimension contract is shared by all layers of the conversion."""
         spec = ActionSpec(
             action_mode={
                 "type": "MoveArmThenGripper",
@@ -65,6 +163,7 @@ class RLBenchConversionTest(unittest.TestCase):
         )
 
     def test_conversion_preserves_native_action_images_state_and_metadata(self):
+        """Test that the conversion from RLBench to LeRobot preserves the native action, images, state, and metadata correctly."""
         with tempfile.TemporaryDirectory() as temporary:
             raw_root = Path(temporary) / "raw"
             output_root = Path(temporary) / "lerobot"
@@ -111,16 +210,28 @@ class RLBenchConversionTest(unittest.TestCase):
                 np.asarray(frame["observation.task_low_dim_state"].iloc[0]).shape,
                 (3,),
             )
-            self.assertEqual(frame["task"].tolist(), ["push the buttons", "push the buttons"])
+            language_instruction = "push the buttons | press all of the buttons"
+            self.assertEqual(frame["task"].tolist(), [language_instruction, language_instruction])
+            self.assertEqual(frame["task_index"].tolist(), [0, 0])
+            tasks = [
+                json.loads(line)
+                for line in (output_root / "meta/tasks.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual(tasks, [{"task_index": 0, "task": language_instruction}])
             self.assertTrue(
                 (output_root / "images" / "observation.images.front_rgb" / "episode_000000").exists()
             )
 
     def test_reader_derives_joint_velocity_action_without_reencoding(self):
+        """Test that the RLBenchRawDataset reader derives the joint velocity action without re-encoding."""
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             _write_fixture(root)
             episode = next(iter(RLBenchRawDataset(root)))
+            self.assertEqual(
+                episode.task_descriptions,
+                ("push the buttons", "press all of the buttons"),
+            )
             np.testing.assert_array_equal(
                 episode.frames[0].action,
                 np.array([10, 11, 12, 13, 14, 15, 16, 0], dtype=np.float32),

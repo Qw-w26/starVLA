@@ -43,6 +43,7 @@ def _modality_metadata(
     state_dim: int,
     action_dim: int,
 ) -> dict[str, Any]:
+    """Describe the semantics and positions of state, action, and image in the final dataset."""
     state = {
         name: {
             "start": start,
@@ -62,12 +63,13 @@ def _modality_metadata(
                 "dtype": "float32",
             }
         },
+
         "video": {
             camera: {"original_key": f"observation.images.{camera}"}
             for camera in camera_names
         },
         "annotation": {
-            "human.action.task_description": {"original_key": "task"}
+            "human.action.task_description": {"original_key": "task_index"}
         },
         "state_dim": state_dim,
     }
@@ -81,6 +83,7 @@ def _info_metadata(
     camera_shapes: Mapping[str, tuple[int, ...]],
     fps: int,
 ) -> dict[str, Any]:
+    """Generate the overall metadata for the LeRobot dataset."""
     features: dict[str, Any] = {
         "observation.state": {
             "dtype": "float32",
@@ -92,12 +95,14 @@ def _info_metadata(
             "shape": list(action_spec.action_shape),
             "names": ["native_action"],
         },
+        # The official LeRobot source code by default includes metadata with names: None.
         "timestamp": {"dtype": "float32", "shape": [1], "names": None},
         "frame_index": {"dtype": "int64", "shape": [1], "names": None},
         "episode_index": {"dtype": "int64", "shape": [1], "names": None},
         "index": {"dtype": "int64", "shape": [1], "names": None},
         "task_index": {"dtype": "int64", "shape": [1], "names": None},
         "task": {"dtype": "string", "shape": [1], "names": None},
+        # The task-specific low-dimensional state from RLBench
         "observation.task_low_dim_state": {
             "dtype": "float32",
             "shape": [-1],
@@ -121,18 +126,43 @@ def _info_metadata(
         "chunks_size": 1000,
         "fps": fps,
         "splits": {"train": f"0:{episodes}"},
+        # The standard Parquet path in the official LeRobot_v2 source code.
         "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
+        # The official image-path layout use
+        # images/{image_key}/episode_{episode_index:06d}/frame_{frame_index:06d}.jpeg.
+        # This converter stores each PNG path directly in the Parquet
+        # observation.images.* entry. StarVLA's LeRobot loader still requires
+        # info["video_path"] during _get_video_path_pattern() initialization,
+        # but get_video() first checks that Parquet column and decodes its
+        # embedded path. This field therefore preserves loader metadata
+        # compatibility; it is not the path used to open a video file here.
+        "video_path": "images/{video_key}/episode_{episode_index:06d}/{frame_index:06d}.png",
         "features": features,
         "action_spec": action_spec.as_dict(),
     }
 
 
 def _copy_image(array: np.ndarray, path: Path) -> dict[str, str]:
+    """Copy an RGB uint8 image to the LeRobot dataset layout and return its relative path."""
     if array.dtype != np.uint8 or array.ndim != 3 or array.shape[-1] != 3:
         raise ValueError(f"Expected raw RGB uint8 HxWx3 image, received {array.shape} {array.dtype}")
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(array, mode="RGB").save(path)
+    # For output_root/images/observation.images.front/episode_000000/000000.png,
+    # path.parents[3] is output_root, so this returns the relative path from output_root.
     return {"path": path.relative_to(path.parents[3]).as_posix()}
+
+
+def _language_instruction(descriptions: tuple[str, ...]) -> str:
+    """Encode all RLBench descriptions in LeRobot's scalar task field.
+        Though RLBench supports multiple descriptions per episode as list[str],
+        LeRobot only supports lang:str as input.
+        This function joins all descriptions into one string with a pipe separator.
+        For now, we will not consider issues such as semantic conflicts between multiple descriptions.
+    """
+    if not descriptions:
+        raise ValueError("RLBench episode has no language descriptions")
+    return " | ".join(descriptions)
 
 
 def _episode_frame_table(
@@ -140,6 +170,8 @@ def _episode_frame_table(
     output_root: Path,
     global_index: int,
     episode_id: int,
+    task_index: int,
+    language_instruction: str,
     fps: int,
 ) -> tuple[pd.DataFrame, dict[str, tuple[int, ...]]]:
     rows = []
@@ -148,12 +180,22 @@ def _episode_frame_table(
         row: dict[str, Any] = {
             "observation.state": frame.state,
             "action": frame.action,
+            # frame_index counts observations serialized in low_dim_obs.pkl,
+            # not every CoppeliaSim step. RLBench may execute gripper-closing
+            # steps without recording them when record_gripper_closing=False.
+            # fps is the effective recorded-observation rate, not _DT or the
+            # CoppeliaSim simulation timestep.
             "timestamp": np.float32(frame_index / fps),
             "frame_index": np.int64(frame_index),
             "episode_index": np.int64(episode_id),
+            # The global index is the frame's position in the entire dataset, not just the episode.
             "index": np.int64(global_index + frame_index),
-            "task_index": np.int64(episode_id),
-            "task": frame.task,
+            # StarVLA resolves this scalar task_index through tasks.jsonl and
+            # passes its string task value to the VLA as the language input.
+            # LeRobot does not support an array of descriptions here, so the
+            # converter joins every RLBench description into one instruction.
+            "task_index": np.int64(task_index),
+            "task": language_instruction,
             "observation.task_low_dim_state": frame.task_low_dim_state,
         }
         for camera, image in frame.images.items():
@@ -177,35 +219,95 @@ def convert(
     action_mode: Mapping[str, Any],
     environment_action_shape: tuple[int, ...] | int,
     framework_action_dim: int,
-    fps: int = 20,
+    fps: int,
 ) -> ConversionResult:
-    """Convert raw RLBench episodes and fail before writing on dimension drift."""
+    """Convert raw demonstrations using an explicit recorded-observation rate.
+
+    RLBench raw observations do not retain skipped simulator steps or a
+    per-observation timestamp, so this rate cannot be recovered from the raw
+    directory. It describes the recorded dataset timeline, not CoppeliaSim's
+    simulation timestep.
+
+    The output_root will contain a LeRobot v2 dataset with the following structure:
+    output_root/
+        data/
+            chunk-000/
+                episode_000000.parquet
+                episode_000001.parquet
+                ...
+        images/
+            observation.images.front/
+                episode_000000/
+                     000000.png
+                     ...
+
+    Metadata files written under `output_root/meta/`:
+    - `action_spec.json`: Records the action specification derived from
+    the configured action mode and the first frame's action shape. The
+    same specification is also included in `info.json`.
+    - `info.json`: Describes the overall LeRobot v2 dataset, including
+    episode and frame counts, robot type, recorded-observation FPS,
+    data path pattern, image path pattern, feature definitions, and
+    action specification. Image features and dataset counts are
+    collected during conversion.
+    - `modality.json`: Describes the semantic layout of the state, action,
+    image, and annotation modalities. State slices are derived from the
+    first frame's `state_slices`; camera entries map to their
+    `observation.images.*` feature keys.
+    - `episodes.jsonl`: Stores one JSON object per converted episode,
+    including its output episode index, associated task index, frame
+    count, and half-open range of global dataset frame indices
+    `[dataset_from_index, dataset_to_index)`.
+    - `tasks.jsonl`: Stores one JSON object per unique converted language
+    instruction, mapping `task_index` to the scalar `task` string.
+    RLBench episode descriptions are joined with ` | ` before task
+    indices are assigned.
+
+    These metadata files describe the converted dataset and its indexing
+    conventions. They do not contain the image files themselves, which
+    are saved separately under `output_root/images/`, or the per-episode
+    frame tables, which are saved under `output_root/data/chunk-000/`.
+    """
 
     raw_root = Path(raw_root)
     output_root = Path(output_root)
+    if fps <= 0:
+        raise ValueError(f"Recorded observation fps must be positive, got {fps}")
     arm_type = str(action_mode["arm"]["type"])
     gripper_type = str(action_mode["gripper"]["type"])
+    # Build reader
     dataset = RLBenchRawDataset(
         raw_root,
         arm_type=arm_type,
         gripper_type=gripper_type,
     )
+
     episodes = iter(dataset)
     try:
+        # Read the first episode to determine the action shape and state dimension.
         first_episode = next(episodes)
     except StopIteration:
         raise ValueError(f"No RLBench episodes found under {raw_root}")
-    first_frame = first_episode.frames[0]
+    try:
+        first_frame = first_episode.frames[0]
+    except IndexError:
+        raise ValueError(f"RLBench episode is empty: {first_episode.task_name}/{first_episode.episode_index}")
     action_shape = tuple(first_frame.action.shape)
     spec = ActionSpec(action_mode=action_mode, action_shape=action_shape)
+    # These dimensions should be equal
     assert_action_dimension_contract(
+        # From ActionSpec, which is derived from the first frame of the first episode
         raw_action_dim=spec.action_dim,
+        # From the RLBench environment's ActionSpec.action_shape()
         environment_action_shape=environment_action_shape,
+        # From the LeRobot dataset layout, which is flattened to a single dimension
         lerobot_action_shape=(len(first_frame.action),),
+        # From the StarVLA framework's ActionSpec.action_dim
         framework_action_dim=framework_action_dim,
         spec=spec,
     )
     state_dim = len(first_frame.state)
+    # Initialize the output directory and copy the raw dataset for reference.
     output_root.mkdir(parents=True, exist_ok=True)
     data_root = output_root / "data" / "chunk-000"
     data_root.mkdir(parents=True, exist_ok=True)
@@ -215,18 +317,40 @@ def convert(
     episodes_jsonl = []
     tasks: dict[str, int] = {}
     episode_count = 0
+    # Iterate through every episode in the raw dataset,
+    # converting each to a Parquet table and copying its images to the LeRobot layout.
     for episode_id, episode in enumerate(chain((first_episode,), episodes)):
         if not episode.frames:
             raise ValueError(f"RLBench episode is empty: {episode.task_name}/{episode.episode_index}")
         if len(episode.frames[0].state) != state_dim:
             raise ValueError("State width changed between RLBench episodes")
-        if any(frame.action.shape != action_shape for frame in episode.frames):
-            raise ValueError("Action shape changed within an RLBench episode")
-        task_index = tasks.setdefault(episode.frames[0].task, len(tasks))
+        if episode.frames[0].action.shape != action_shape:
+            raise ValueError("Action shape changed between RLBench episodes")
+        # Trade-off: validate the first frame of each episode to detect
+        # action-shape changes across episodes with minimal overhead.
+        # Checking every frame would also detect shape changes within an
+        # episode, but adds validation cost and may be unnecessary if RLBench
+        # guarantees a consistent action shape within each episode.
+        # if any(frame.action.shape != action_shape for frame in episode.frames):
+        #     raise ValueError("Action shape changed within an RLBench episode")
+
+        descriptions = episode.task_descriptions
+        if not descriptions:
+            raise ValueError(f"RLBench episode has no language descriptions: {episode.task_name}")
+        language_instruction = _language_instruction(descriptions)
+        task_index = tasks.setdefault(language_instruction, len(tasks))
+        # Generate a Parquet table for the episode and copy its images to the LeRobot layout.
         table, episode_cameras = _episode_frame_table(
-            episode, output_root, total_frames, episode_id, fps
+            episode,
+            output_root,
+            total_frames,
+            episode_id,
+            task_index,
+            language_instruction,
+            fps,
         )
         camera_shapes.update(episode_cameras)
+        # For example, Episode 0 will have the Parquet file: data/chunk-000/episode_000000.parquet
         table.to_parquet(data_root / f"episode_{episode_id:06d}.parquet", index=False)
         length = len(table)
         episodes_jsonl.append(
@@ -235,6 +359,7 @@ def convert(
                 "tasks": [task_index],
                 "length": length,
                 "dataset_from_index": total_frames,
+                # Don't include the last frame in the range, so this is the first index of the next episode.
                 "dataset_to_index": total_frames + length,
             }
         )
@@ -286,7 +411,12 @@ def main() -> None:
         help="RLBENCH Environment.action_shape() flattened dimension",
     )
     parser.add_argument("--framework-action-dim", type=int, required=True)
-    parser.add_argument("--fps", type=int, default=20)
+    parser.add_argument(
+        "--fps",
+        type=int,
+        required=True,
+        help="Recorded observation rate; not the CoppeliaSim simulation timestep",
+    )
     args = parser.parse_args()
     with args.config.open("r", encoding="utf-8") as stream:
         config = yaml.safe_load(stream)

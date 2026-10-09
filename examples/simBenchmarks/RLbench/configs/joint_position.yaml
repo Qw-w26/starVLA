@@ -1,7 +1,0 @@
-env:
-  name: rlbench
-  camera_names: [front_rgb, left_shoulder_rgb, right_shoulder_rgb, wrist_rgb, overhead_rgb]
-  action_mode:
-    type: MoveArmThenGripper
-    arm: {type: JointPosition, kwargs: {}}
-    gripper: {type: Discrete, kwargs: {}}
