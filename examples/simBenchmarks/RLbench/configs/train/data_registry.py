@@ -16,7 +16,7 @@ ROBOT_TYPE_CONFIG_MAP = {
 DATASET_NAMED_MIXTURES = {
     "rlbench_joint_velocity_9task": [
         (
-            "joint_velocity_9task_20261007_154500",
+            "joint_velocity_9task",
             1.0,
             "rlbench_joint_velocity",
         ),

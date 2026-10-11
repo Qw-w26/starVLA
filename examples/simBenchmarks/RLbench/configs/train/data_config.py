@@ -35,6 +35,17 @@ class RLBenchJointVelocityDataConfig:
         "state.gripper_pose",
         "state.gripper_matrix",
     ]
+    state_key_dims = {
+        "state.joint_positions": 7,
+        "state.joint_velocities": 7,
+        "state.joint_forces": 7,
+        "state.gripper_open": 1,
+        "state.gripper_joint_positions": 2,
+        "state.gripper_touch_forces": 6,
+        "state.gripper_pose": 7,
+        "state.gripper_matrix": 16,
+    }
+    action_key_dims = {"action.native": 8}
     action_keys = ["action.native"]
     language_keys = ["annotation.human.action.task_description"]
     observation_indices = [0]

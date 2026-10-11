@@ -9,10 +9,16 @@ from typing import Any
 
 from deployment.model_server.tools.websocket_policy_client import WebsocketClientPolicy
 from examples.simBenchmarks.RLbench.eval_files.rlbench_adapter import (
+    _DEFAULT_STATE_KEYS,
     RLBenchAdapter,
     StarVLAPolicyAdapter,
     build_action_mode,
 )
+
+
+def rollout_success(*, total_reward: float, terminate: bool) -> bool:
+    """RLBench may terminate failed episodes; only a positive success reward wins."""
+    return bool(total_reward > 0.0)
 
 
 def _load_config(path: Path) -> dict[str, Any]:
@@ -60,7 +66,13 @@ def main() -> None:
     environment_module = import_module("rlbench.environment")
     environment = environment_module.Environment(action_mode=action_mode, headless=args.headless)
     environment.launch()
-    adapter = RLBenchAdapter(environment, action_mode, env_config.get("camera_names", ("front_rgb",)))
+    adapter = RLBenchAdapter(
+        environment,
+        action_mode,
+        env_config.get("camera_names", ("front_rgb",)),
+        state_keys=_DEFAULT_STATE_KEYS if env_config.get("include_state", False) else (),
+        gripper_type=env_config["action_mode"]["gripper"]["type"],
+    )
     # The policy adapter wraps the websocket client policy to handle RLBench-specific action normalization and observation formatting.
     policy = StarVLAPolicyAdapter(
         WebsocketClientPolicy(args.host, args.port),
@@ -82,7 +94,7 @@ def main() -> None:
                 total_reward += reward
                 if terminate:
                     break
-            print(json.dumps({"episode": episode, "reward": total_reward, "success": bool(terminate)}))
+            print(json.dumps({"episode": episode, "reward": total_reward, "success": rollout_success(total_reward=total_reward, terminate=terminate)}))
     finally:
         environment.shutdown()
 

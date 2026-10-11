@@ -44,6 +44,16 @@ _DEFAULT_CAMERA_NAMES = (
     "wrist_rgb",
     "overhead_rgb",
 )
+_DEFAULT_STATE_KEYS = (
+    "state.joint_positions",
+    "state.joint_velocities",
+    "state.joint_forces",
+    "state.gripper_open",
+    "state.gripper_joint_positions",
+    "state.gripper_touch_forces",
+    "state.gripper_pose",
+    "state.gripper_matrix",
+)
 
 
 def load_rlbench_modules() -> RLBenchModules:
@@ -186,10 +196,19 @@ def _language(descriptions: Sequence[str] | str) -> str:
 class RLBenchAdapter:
     """Small environment-side adapter that preserves native RLBench actions."""
 
-    def __init__(self, environment: Any, action_mode: Any, camera_names: Sequence[str] = _DEFAULT_CAMERA_NAMES):
+    def __init__(
+        self,
+        environment: Any,
+        action_mode: Any,
+        camera_names: Sequence[str] = _DEFAULT_CAMERA_NAMES,
+        state_keys: Sequence[str] = (),
+        gripper_type: str | None = None,
+    ):
         self.environment = environment
         self.action_mode = action_mode
         self.camera_names = tuple(camera_names)
+        self.state_keys = tuple(state_keys)
+        self.gripper_type = gripper_type
         self.task = None
         # Prefer RLBench Environment.action_shape; retain the native ActionMode
         # path for lightweight adapters and custom environments.
@@ -202,8 +221,16 @@ class RLBenchAdapter:
     def step(self, raw_action: Any) -> tuple[Any, float, bool]:
         if self.task is None:
             raise RuntimeError("Call reset(task) before step(action)")
-        native_action = validate_native_action(raw_action, self.action_mode, self.spec)
+        native_action = self.action_for_step(raw_action, self.gripper_type)
         return self.task.step(native_action)
+
+    def action_for_step(self, raw_action: Any, gripper_type: str | None = None) -> np.ndarray:
+        """Apply only native Discrete-gripper thresholding before env.step."""
+        native_action = validate_native_action(raw_action, self.action_mode, self.spec)
+        if gripper_type == "Discrete":
+            native_action = native_action.copy()
+            native_action[-1] = float(native_action[-1] > 0.5)
+        return native_action
 
     def policy_example(self, observation: Any, descriptions: Sequence[str] | str) -> dict[str, Any]:
         images = []
@@ -217,7 +244,17 @@ class RLBenchAdapter:
                 "No configured RLBench camera image was found in observation. "
                 f"Checked: {self.camera_names}"
             )
-        return {"image": images, "lang": _language(descriptions)}
+        example = {"image": images, "lang": _language(descriptions)}
+        if self.state_keys:
+            state_parts = []
+            for full_key in self.state_keys:
+                name = full_key.removeprefix("state.")
+                value = _observation_value(observation, name)
+                if value is None:
+                    raise ValueError(f"RLBench observation is missing configured state key {full_key!r}")
+                state_parts.append(np.asarray(value, dtype=np.float32).reshape(-1))
+            example["state"] = np.concatenate(state_parts, axis=0)[None, :]
+        return example
 
 
 class StarVLAPolicyAdapter:

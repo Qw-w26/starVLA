@@ -32,6 +32,24 @@ class ConversionResult:
     output_root: Path
 
 
+def validate_conversion_action_mode(action_mode: Mapping[str, Any]) -> None:
+    """Reject native semantics whose demonstration labels are not implemented.
+
+    RLBench stores absolute observations. Relative JointPosition and pose modes
+    require scene-state deltas during conversion, so accepting them here would
+    silently write labels with the wrong physical meaning.
+    """
+    arm = action_mode.get("arm", {})
+    arm_type = arm.get("type") if isinstance(arm, Mapping) else None
+    kwargs = arm.get("kwargs", {}) if isinstance(arm, Mapping) else {}
+    if arm_type in {"JointPosition", "EndEffectorPoseViaIK", "EndEffectorPoseViaPlanning"}:
+        if isinstance(kwargs, Mapping) and kwargs.get("absolute_mode") is False:
+            raise ValueError(
+                "RLBench conversion does not support relative action labels "
+                f"for {arm_type}; collect/convert an absolute-mode dataset instead"
+            )
+
+
 def _write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
@@ -275,6 +293,7 @@ def convert(
         raise ValueError(f"Recorded observation fps must be positive, got {fps}")
     arm_type = str(action_mode["arm"]["type"])
     gripper_type = str(action_mode["gripper"]["type"])
+    validate_conversion_action_mode(action_mode)
     # Build reader
     dataset = RLBenchRawDataset(
         raw_root,
