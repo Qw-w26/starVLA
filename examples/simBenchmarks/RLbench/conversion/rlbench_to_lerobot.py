@@ -23,6 +23,9 @@ from examples.simBenchmarks.RLbench.conversion.rlbench_schema import (
 )
 
 
+_LEROBOT_CHUNK_SIZE = 1000
+
+
 @dataclass(frozen=True)
 class ConversionResult:
     total_frames: int
@@ -96,6 +99,8 @@ def _modality_metadata(
 def _info_metadata(
     episodes: int,
     frames: int,
+    tasks: int,
+    chunks: int,
     action_spec: ActionSpec,
     state_dim: int,
     camera_shapes: Mapping[str, tuple[int, ...]],
@@ -138,10 +143,10 @@ def _info_metadata(
         "robot_type": "rlbench_panda",
         "total_episodes": episodes,
         "total_frames": frames,
-        "total_tasks": 0,
+        "total_tasks": tasks,
         "total_videos": 0,
-        "total_chunks": 1,
-        "chunks_size": 1000,
+        "total_chunks": chunks,
+        "chunks_size": _LEROBOT_CHUNK_SIZE,
         "fps": fps,
         "splits": {"train": f"0:{episodes}"},
         # The standard Parquet path in the official LeRobot_v2 source code.
@@ -181,6 +186,17 @@ def _language_instruction(descriptions: tuple[str, ...]) -> str:
     if not descriptions:
         raise ValueError("RLBench episode has no language descriptions")
     return " | ".join(descriptions)
+
+
+def _episode_parquet_path(output_root: Path, episode_id: int) -> Path:
+    """Return the LeRobot v2 path for an episode using its declared chunks."""
+    chunk_index = episode_id // _LEROBOT_CHUNK_SIZE
+    return (
+        output_root
+        / "data"
+        / f"chunk-{chunk_index:03d}"
+        / f"episode_{episode_id:06d}.parquet"
+    )
 
 
 def _episode_frame_table(
@@ -291,6 +307,10 @@ def convert(
     output_root = Path(output_root)
     if fps <= 0:
         raise ValueError(f"Recorded observation fps must be positive, got {fps}")
+    if output_root.exists() and any(output_root.iterdir()):
+        raise FileExistsError(
+            f"RLBench conversion output directory is not empty: {output_root}"
+        )
     arm_type = str(action_mode["arm"]["type"])
     gripper_type = str(action_mode["gripper"]["type"])
     validate_conversion_action_mode(action_mode)
@@ -328,8 +348,6 @@ def convert(
     state_dim = len(first_frame.state)
     # Initialize the output directory and copy the raw dataset for reference.
     output_root.mkdir(parents=True, exist_ok=True)
-    data_root = output_root / "data" / "chunk-000"
-    data_root.mkdir(parents=True, exist_ok=True)
 
     total_frames = 0
     camera_shapes: dict[str, tuple[int, ...]] = {}
@@ -369,8 +387,9 @@ def convert(
             fps,
         )
         camera_shapes.update(episode_cameras)
-        # For example, Episode 0 will have the Parquet file: data/chunk-000/episode_000000.parquet
-        table.to_parquet(data_root / f"episode_{episode_id:06d}.parquet", index=False)
+        parquet_path = _episode_parquet_path(output_root, episode_id)
+        parquet_path.parent.mkdir(parents=True, exist_ok=True)
+        table.to_parquet(parquet_path, index=False)
         length = len(table)
         episodes_jsonl.append(
             {
@@ -390,7 +409,14 @@ def convert(
         output_root / "meta/info.json",
         {
             **_info_metadata(
-                episode_count, total_frames, spec, state_dim, camera_shapes, fps
+                episode_count,
+                total_frames,
+                len(tasks),
+                (episode_count + _LEROBOT_CHUNK_SIZE - 1) // _LEROBOT_CHUNK_SIZE,
+                spec,
+                state_dim,
+                camera_shapes,
+                fps,
             ),
             "action_spec": spec.as_dict(),
         },

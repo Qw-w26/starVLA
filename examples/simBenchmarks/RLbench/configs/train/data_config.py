@@ -15,6 +15,9 @@ class RLBenchJointVelocityDataConfig:
     def __init__(self, action_horizon: int):
         if action_horizon <= 0:
             raise ValueError(f"action_horizon must be positive, got {action_horizon}")
+        # The loader applies offsets relative to the input observation. RLBench's
+        # official imitation-learning example uses each observation's own
+        # joint_velocities as the JointVelocity supervision target.
         self.action_indices = list(range(action_horizon))
 
     embodiment_tag = EmbodimentTag.NEW_EMBODIMENT

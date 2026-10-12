@@ -174,6 +174,17 @@ class EnvironmentAdapterTest(unittest.TestCase):
         self.assertEqual(len(example["image"]), 1)
         self.assertEqual(example["image"][0].shape, (2, 2, 3))
 
+    def test_policy_language_uses_all_ordered_descriptions_like_conversion(self):
+        example = self.adapter.policy_example(
+            {"front_rgb": np.zeros((2, 2, 3), dtype=np.uint8)},
+            ["open the drawer", "pull its handle", "open the drawer"],
+        )
+
+        self.assertEqual(
+            example["lang"],
+            "open the drawer | pull its handle | open the drawer",
+        )
+
 
 class PolicyOutputAdapterTest(unittest.TestCase):
     def test_first_predicted_action_is_checked_against_native_action_dimension(self):

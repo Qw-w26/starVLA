@@ -190,7 +190,8 @@ def _language(descriptions: Sequence[str] | str) -> str:
         return descriptions
     if not descriptions:
         raise ValueError("RLBench reset returned no language descriptions")
-    return str(descriptions[0])
+    # Keep evaluation text identical to the conversion-time task encoding.
+    return " | ".join(str(description) for description in descriptions)
 
 
 class RLBenchAdapter:

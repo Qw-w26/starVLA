@@ -16,7 +16,11 @@ from examples.simBenchmarks.RLbench.conversion.rlbench_schema import (
     ActionSpec,
     assert_action_dimension_contract,
 )
-from examples.simBenchmarks.RLbench.conversion.rlbench_to_lerobot import convert
+from examples.simBenchmarks.RLbench.conversion.rlbench_to_lerobot import (
+    _episode_parquet_path,
+    convert,
+    validate_conversion_action_mode,
+)
 from examples.simBenchmarks.RLbench.configs.train.data_config import (
     RLBenchJointVelocityDataConfig,
 )
@@ -85,13 +89,21 @@ class RLBenchConversionTest(unittest.TestCase):
         config_class = ROBOT_TYPE_CONFIG_MAP["rlbench_joint_velocity"]
         self.assertIs(config_class, RLBenchJointVelocityDataConfig)
         config = config_class(action_horizon=5)
+        # RLBench's official imitation-learning example supervises each
+        # observation with that observation's joint_velocities. The loader
+        # adds these offsets to the current observation index.
         self.assertEqual(config.action_indices, [0, 1, 2, 3, 4])
 
-    def test_registry_stores_config_class_and_horizon_is_injected(self):
-        config_class = ROBOT_TYPE_CONFIG_MAP["rlbench_joint_velocity"]
-        self.assertIs(config_class, RLBenchJointVelocityDataConfig)
-        config = config_class(action_horizon=5)
-        self.assertEqual(config.action_indices, [0, 1, 2, 3, 4])
+    def test_episode_parquet_paths_follow_lerobot_chunk_size(self):
+        root = Path("/tmp/rlbench-conversion")
+        self.assertEqual(
+            _episode_parquet_path(root, 999),
+            root / "data/chunk-000/episode_000999.parquet",
+        )
+        self.assertEqual(
+            _episode_parquet_path(root, 1000),
+            root / "data/chunk-001/episode_001000.parquet",
+        )
 
     def test_video_path_is_required_metadata_but_not_the_png_decode_path(self):
         """
@@ -191,6 +203,8 @@ class RLBenchConversionTest(unittest.TestCase):
             self.assertEqual(action_spec["action_dim"], 8)
             info = json.loads((output_root / "meta/info.json").read_text())
             self.assertEqual(info["action_spec"]["action_dim"], 8)
+            self.assertEqual(info["total_tasks"], 1)
+            self.assertEqual(info["total_chunks"], 1)
             modality = json.loads((output_root / "meta/modality.json").read_text())
             self.assertEqual(
                 modality["video"]["front_rgb"]["original_key"],
@@ -221,6 +235,50 @@ class RLBenchConversionTest(unittest.TestCase):
             self.assertTrue(
                 (output_root / "images" / "observation.images.front_rgb" / "episode_000000").exists()
             )
+
+    def test_conversion_rejects_a_nonempty_output_root_before_writing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            raw_root = Path(temporary) / "raw"
+            output_root = Path(temporary) / "lerobot"
+            _write_fixture(raw_root)
+            output_root.mkdir()
+            (output_root / "old-output.txt").write_text("stale", encoding="utf-8")
+
+            with self.assertRaisesRegex(FileExistsError, "not empty"):
+                convert(
+                    raw_root,
+                    output_root,
+                    action_mode={
+                        "type": "MoveArmThenGripper",
+                        "arm": {"type": "JointVelocity"},
+                        "gripper": {"type": "Discrete"},
+                    },
+                    environment_action_shape=(8,),
+                    framework_action_dim=8,
+                    fps=20,
+                )
+
+    def test_default_pose_modes_are_absolute_in_the_installed_rlbench_version(self):
+        for arm_type in (
+            "JointPosition",
+            "EndEffectorPoseViaIK",
+            "EndEffectorPoseViaPlanning",
+        ):
+            validate_conversion_action_mode(
+                {
+                    "type": "MoveArmThenGripper",
+                    "arm": {"type": arm_type, "kwargs": {}},
+                    "gripper": {"type": "Discrete"},
+                }
+            )
+            with self.assertRaisesRegex(ValueError, "relative action labels"):
+                validate_conversion_action_mode(
+                    {
+                        "type": "MoveArmThenGripper",
+                        "arm": {"type": arm_type, "kwargs": {"absolute_mode": False}},
+                        "gripper": {"type": "Discrete"},
+                    }
+                )
 
     def test_reader_derives_joint_velocity_action_without_reencoding(self):
         """Test that the RLBenchRawDataset reader derives the joint velocity action without re-encoding."""
